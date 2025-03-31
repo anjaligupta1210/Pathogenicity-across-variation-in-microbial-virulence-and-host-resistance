@@ -1,0 +1,1167 @@
+---
+title: "Data Analysis for pathogenicity across variation in microbial virulence and host resistance"
+author: "Anjali Gupta"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load all required libraries
+
+If one or more packages is not already installed for you, you can install it using ```install.packages("PackageName")```
+
+
+```{r message=FALSE, warning=FALSE}
+
+library(readr)
+library(dplyr)
+library(stringr)
+library(survival)
+library(ggplot2)
+library(survminer)
+library(wesanderson)
+library(ggpubr)
+library(coxme)
+library(lme4)
+library(corrplot)
+library(RColorBrewer)
+library(ggrepel)
+library(reshape2)
+library(ggcorrplot)
+library(nlme)
+
+```
+
+## Set your working directory and import dataset
+
+Set your working directory to the folder where your dataset is present
+
+The dataset can be downloaded from [Main Data](https://github.com/anjaligupta1210/Pathogen-Potential/blob/main/Data.csv) and [Bacterial Load Data](https://github.com/anjaligupta1210/Pathogen-Potential/blob/main/PathogenPotential_BacterialLoad_AG.csv)
+
+```{r message=FALSE, warning=FALSE}
+setwd("~/Documents/GitHub/Pathogen-Potential")
+
+Data <- read_csv("PathogenPotential_AG_04062023.csv")
+
+LoadData <- read_csv("PathogenPotential_BacterialLoad_AG.csv")
+
+```
+
+## Data processing and transformation to survival format
+
+Entering Dpt host genotype information 
+
+```{r message=FALSE, warning=FALSE}
+Data <- Data %>%
+  mutate(Genotype = recode(Genotype,
+                           "1G" = "DptNull",
+                           "1N" = "DptR",
+                           "8N" = "DptS"))
+```
+
+Converting survival data to 0/1 format
+
+```{r message=FALSE, warning=FALSE}
+#Create an empty dataframe Data_1 to store the survival information
+
+Data_1 <- data.frame(Vial_ID = character(),
+                     Genotype = character(),
+                     Treatment = character(),
+                     OD_group = character(),
+                     Date = character(),
+                     Day_Dead = numeric(),
+                     censor = numeric())
+
+
+#Convert data to 0/1 format
+
+for(i in 1:length(Data$Vial_ID)){
+  temp=data.frame(Data[i,])
+  
+  for(j in seq(10,22,2)){
+    k = temp[1,j-2]-temp[1,j]
+    if(k>0){
+      for(kk in 1:k){
+        Data_1[length(Data_1$Vial_ID)+1,]=c(temp[1,1],
+                                            as.character(temp[1,2]),
+                                            as.character(temp[1,3]),
+                                            temp[1,5],
+                                            as.character(temp[1,6]),
+                                            j/2 - 4,
+                                            1)
+      }    
+    } 
+  }
+  
+  for(j in 8){
+    k = temp[1,j]
+    if(k>0){
+      for(kk in 1:k){
+        Data_1[length(Data_1$Vial_ID)+1,]=c(temp[1,1],
+                                            as.character(temp[1,2]),
+                                            as.character(temp[1,3]),
+                                            temp[1,5],
+                                            as.character(temp[1,6]),
+                                            j/2 - 4,
+                                            0)
+      }    
+    } 
+  }
+  
+  for(j in 22){
+    k = temp[1,j]
+    if(k>0){
+      for(kk in 1:k){
+        Data_1[length(Data_1$Vial_ID)+1,]=c(temp[1,1],
+                                            as.character(temp[1,2]),
+                                            as.character(temp[1,3]),
+                                            temp[1,5],
+                                            as.character(temp[1,6]),
+                                            j/2 - 4,
+                                            0)
+      }
+    }
+  }
+}
+
+
+#Converting Data_1 columns from character to numeric/factors
+
+Data_1$Day_Dead = as.numeric(Data_1$Day_Dead)
+Data_1$censor = as.numeric(Data_1$censor)
+
+Data_1$Genotype <- as.factor(Data_1$Genotype)
+Data_1$Treatment <- as.factor(Data_1$Treatment)
+Data_1$Date <- as.factor(Data_1$Date)
+Data_1$OD_group <- as.factor(Data_1$OD_group)
+
+#Data_1 is the dataframe containing only survival data 
+```
+
+Calculating fraction symptomatic
+
+Dead individuals on any day are assumed to be symptomatic
+
+```{r message=FALSE, warning=FALSE}
+Data$Fs_Day1 <- (Data$Day0_Alive - Data$Day1_Climbing) / Data$Day0_Alive
+Data$Fs_Day2 <- (Data$Day0_Alive - Data$Day2_Climbing) / Data$Day0_Alive
+Data$Fs_Day3 <- (Data$Day0_Alive - Data$Day3_Climbing) / Data$Day0_Alive
+Data$Fs_Day4 <- (Data$Day0_Alive - Data$Day4_Climbing) / Data$Day0_Alive
+Data$Fs_Day5 <- (Data$Day0_Alive - Data$Day5_Climbing) / Data$Day0_Alive
+Data$Fs_Day6 <- (Data$Day0_Alive - Data$Day6_Climbing) / Data$Day0_Alive
+Data$Fs_Day7 <- (Data$Day0_Alive - Data$Day7_Climbing) / Data$Day0_Alive
+
+
+#Creating a dataframe Fs for fraction symptomatic by transforming data
+Fs <- melt(Data[,c(1:3,5,6,24:30)], id=c("Vial_ID",
+                                         "Genotype",
+                                         "Treatment",
+                                         "OD_group",
+                                         "Date"))
+colnames(Fs)[7] <- "Fs"
+
+
+Fs[c('F', 'Day')] <- str_split_fixed(Fs$variable, '_Day', 2)
+Fs <- Fs[,c(1:5,7,9)]
+```
+
+Calculating Pathogen Potential
+
+PP = (Fs/I) * (10^M)
+
+```{r message=FALSE, warning=FALSE}
+
+Data$PP_Day1 <- (Data$Fs_Day1/exp(Data$OD_group)) * 
+  (10 ^ ((Data$Day0_Alive - Data$Day1_Alive)/Data$Day0_Alive))
+
+Data$PP_Day2 <- (Data$Fs_Day2/exp(Data$OD_group)) * 
+  (10 ^ ((Data$Day0_Alive - Data$Day2_Alive)/Data$Day0_Alive))
+
+Data$PP_Day3 <- (Data$Fs_Day3/exp(Data$OD_group)) * 
+  (10 ^ ((Data$Day0_Alive - Data$Day3_Alive)/Data$Day0_Alive))
+
+Data$PP_Day4 <- (Data$Fs_Day4/exp(Data$OD_group)) * 
+  (10 ^ ((Data$Day0_Alive - Data$Day4_Alive)/Data$Day0_Alive))
+
+Data$PP_Day5 <- (Data$Fs_Day5/exp(Data$OD_group)) * 
+  (10 ^ ((Data$Day0_Alive - Data$Day5_Alive)/Data$Day0_Alive))
+
+Data$PP_Day6 <- (Data$Fs_Day6/exp(Data$OD_group)) * 
+  (10 ^ ((Data$Day0_Alive - Data$Day6_Alive)/Data$Day0_Alive))
+
+Data$PP_Day7 <- (Data$Fs_Day7/exp(Data$OD_group)) * 
+  (10 ^ ((Data$Day0_Alive - Data$Day7_Alive)/Data$Day0_Alive))
+
+#Creating a dataframe PP for pathogen potential by transforming data
+PP <- melt(Data[,c(1:3,5,6,31:37)], id=c("Vial_ID",
+                                         "Genotype",
+                                         "Treatment",
+                                         "OD_group",
+                                         "Date"))
+colnames(PP)[7] <- "PP"
+
+PP[c('p', 'Day')] <- str_split_fixed(PP$variable, '_Day', 2)
+
+PP <- PP[,c(1:5,7,9)]
+```
+
+Calculating proportion survival 
+
+```{r message=FALSE, warning=FALSE}
+#Proportion survival on Day X
+Data$Prop_Day0_Alive <- Data$Day0_Alive/Data$Day0_Alive
+Data$Prop_Day1_Alive <- Data$Day1_Alive/Data$Day0_Alive
+Data$Prop_Day2_Alive <- Data$Day2_Alive/Data$Day0_Alive
+Data$Prop_Day3_Alive <- Data$Day3_Alive/Data$Day0_Alive
+Data$Prop_Day4_Alive <- Data$Day4_Alive/Data$Day0_Alive
+Data$Prop_Day5_Alive <- Data$Day5_Alive/Data$Day0_Alive
+Data$Prop_Day6_Alive <- Data$Day6_Alive/Data$Day0_Alive
+Data$Prop_Day7_Alive <- Data$Day7_Alive/Data$Day0_Alive
+```
+
+Calculating cumulative risk scores <https://stat.ethz.ch/R-manual/R-devel/library/survival/html/predict.coxph.html>
+
+```{r message=FALSE, warning=FALSE}
+Data_Risk <- subset(Data_1, !Day_Dead==0)
+cox_model <- coxph(Surv(Day_Dead, censor) ~ as.factor(Vial_ID) +
+                     Genotype + 
+                     Treatment + 
+                     OD_group, 
+                   data = Data_Risk)
+
+# Compute the risk scores
+risk_scores <- predict(cox_model, type = 'risk')
+
+#Add it to a dataframe
+Data_Risk$Risk_Score <- risk_scores
+
+#group by vial id and day to assign cumulative scores
+
+Data_1_2 <- Data_Risk %>%
+  group_by(Vial_ID,Genotype,Treatment,OD_group) %>%
+  summarise(Vial_ID=Vial_ID,
+            Genotype=Genotype,
+            Treatment=Treatment,
+            OD_group=OD_group,
+            Risk_Score=sum(Risk_Score)) %>%
+  distinct()
+
+#Add risk scores to the main dataframe
+Data <- merge(Data, Data_1_2)
+```
+
+Calculating PP_T & Fs_T & Fs/T 
+
+T=median survival day
+
+```{r message=FALSE, warning=FALSE}
+#PP_T Fs_T Fs/T
+
+#Estimating mean survival day
+Surv <- melt(Data[,c(1:4,6,39:45)], id=c("Vial_ID",
+                                         "Genotype",
+                                         "Treatment",
+                                         "OD_group",
+                                         "Date"))
+colnames(Surv)[7] <- "Prop_alive"
+
+Surv[c('p', 'Day')] <- str_split_fixed(Surv$variable, '_Alive', 2)
+Surv[c('p', 'Day')] <- str_split_fixed(Surv$p, 'Prop_Day', 2)
+
+Surv <- Surv[,c(1:5,7,9)]
+
+Surv$Day_T <- 7
+
+for(i in 1:length(Surv$Vial_ID)){
+  temp=data.frame(Surv[i,])
+  
+  for(j in 6) {
+    k=temp[1,j]
+    
+    if(k<=0.5) {
+      Surv$Day_T[i] = Surv$Day[i]
+    }
+  }
+}
+
+
+Surv_1 <- Surv %>%
+  group_by(Vial_ID,Genotype,Treatment,OD_group) %>%
+  summarise(Vial_ID=Vial_ID,
+            Genotype=Genotype,
+            Treatment=Treatment,
+            OD_group=OD_group,
+            Day_T=min(Day_T)) %>%
+  distinct()
+
+Data <- merge(Data, Surv_1)
+
+Data$Fs_T <- NA
+Data$PP_T <- NA
+
+#Estimating pathogen potential and fraction symptomatic on mean survival day T
+
+for(i in 1:length(Data$Vial_ID)) {
+  temp=data.frame(Data[i,])
+  
+  j=temp[1,47]
+  
+  if(j==1) {
+    Data$Fs_T[i] = Data$Fs_Day1[i]
+    Data$PP_T[i] = Data$PP_Day1[i]
+  }
+  
+  if(j==2) {
+    Data$Fs_T[i] = Data$Fs_Day2[i]
+    Data$PP_T[i] = Data$PP_Day2[i]
+  }
+  
+  if(j==3) {
+    Data$Fs_T[i] = Data$Fs_Day3[i]
+    Data$PP_T[i] = Data$PP_Day3[i]
+  }
+  
+  if(j==4) {
+    Data$Fs_T[i] = Data$Fs_Day4[i]
+    Data$PP_T[i] = Data$PP_Day4[i]
+  }
+  
+  if(j==5) {
+    Data$Fs_T[i] = Data$Fs_Day5[i]
+    Data$PP_T[i] = Data$PP_Day5[i]
+  }
+  
+  if(j==6) {
+    Data$Fs_T[i] = Data$Fs_Day6[i]
+    Data$PP_T[i] = Data$PP_Day6[i]
+  }
+  
+  if(j==7) {
+    Data$Fs_T[i] = Data$Fs_Day7[i]
+    Data$PP_T[i] = Data$PP_Day7[i]
+  }
+  
+}
+
+Data$`Fs_T/T` <- Data$Fs_T/as.numeric(Data$Day_T)
+```
+
+## Main Figures
+
+### Figure 1B
+
+```{r message=FALSE, warning=FALSE}
+Fig1b <- ggplot(Data, aes(x = as.factor(OD_group),
+                 y = Prop_Day4_Alive,
+                 pch = as.factor(OD_group),
+                 col = Genotype,
+                #fill = as.numeric(OD_group)
+                )) +
+  stat_summary(geom = "errorbar", 
+               position = position_dodge(0.7), 
+               width = 0.3,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  stat_summary(geom = "point", 
+               position = position_dodge(0.7), 
+               size = 6,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  facet_grid(~Treatment, scales = "free_x") +
+  coord_cartesian(ylim=c(0,1)) +
+  scale_x_discrete(
+    labels = function(x) {
+      if ("LB" %in% unique(Data$Treatment)) {
+        # For LB, show only '0'
+        ifelse(x == "0", "0", x)
+      } else {
+        # For other treatments, show the specific values
+        ifelse(x %in% c("0.01", "0.1", "0.5", "1", "4", "8"), x, NA)
+      }
+    }
+  ) +
+  scale_shape_manual(values = c(4,1,2,0,5,7,8)) + 
+  theme_classic() +
+  labs(x = "OD",
+       y = "Proportion alive on day 4",
+       pch="OD") +
+  scale_color_manual(values = c("red","blue","darkgreen")) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 30),
+        legend.title = element_text(size = 30),
+        axis.title = element_text(size = 30),
+        strip.background = element_blank(),
+        strip.text = element_text(size = 30, face = "italic"),
+        axis.text = element_text(size = 30))
+```
+
+**Figure 1B** - Interval plot of the proportion of flies alive on day 4 post infection for various host genotypes (homozygous serine dpt (wildtype, dptS69), homozygous arginine dpt (dptS69R), and dpt null (Δdpt)), and variable pathogen strains (*P. burhodograneria* Strain D, *P. rettgeri*, *P. sneebia*, *P. alcalifaciens*) with different loads of infective inoculum (OD).
+
+```{r fig.width=30, fig.height=12, message=FALSE, echo=FALSE, warning=FALSE}
+Fig1b
+```
+
+### Figure 2
+
+```{r message=FALSE, warning=FALSE}
+
+Data_1$Treatment <- factor(Data_1$Treatment, levels = c("LB",
+                                                        "P. alcalifaciens",
+                                                        "P. burhodogranareia strD",
+                                                        "P. rettgeri",
+                                                        "P. sneebia"))
+
+fit <- survfit(Surv(Day_Dead, censor) ~ OD_group + Treatment + Genotype,
+               data = Data_1)
+
+# Figure 2
+my_labeller <- function(value) {
+  label <- paste0("OD = ", value)
+  return(label)
+}
+
+Survival <- ggplot(data = surv_summary(fit), 
+                   aes(x = time, 
+                       y = surv, 
+                       group = interaction(Genotype, OD_group))) +
+  facet_grid(OD_group~Treatment, scales = "free_x", labeller = labeller(OD_group = my_labeller)) +
+  coord_cartesian(ylim=c(0,1)) +
+  scale_x_continuous(
+    breaks = seq(0, 7, by = 1),  # Add x-axis labels at each day
+    labels = seq(0, 7, by = 1)  
+  ) +
+  theme_classic() +
+  labs(x = "Days post infection",
+       y = "Survival") +
+  geom_step(aes(color = Genotype), size = 1.5, alpha=0.4) +
+  geom_point(aes(color = Genotype, shape = OD_group), size = 4, 
+             show.legend = FALSE) +
+  scale_shape_manual(values = c(4,1,2,0,5,7,8)) +
+  coord_cartesian(xlim = c(0, 7)) +
+  scale_color_manual(values = c("red", "blue", "darkgreen")) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 30),
+        legend.title = element_text(size = 30),
+        axis.title = element_text(size = 30),
+        strip.background = element_blank(),
+        strip.text.y = element_text(size = 30),
+        strip.text.x = element_text(size = 30, face = "italic"),
+        axis.text = element_text(size = 30))
+
+
+Fs$Treatment <- factor(Fs$Treatment, levels = c("LB",
+                                                "P. alcalifaciens",
+                                                "P. burhodogranareia strD",
+                                                "P. rettgeri",
+                                                "P. sneebia"))
+# Figure 2B
+FracSick <- ggplot(subset(Fs,
+                         Day==4), 
+                aes(x = as.factor(OD_group), 
+                    y = Fs, 
+                    pch = as.factor(OD_group),
+                    col = Genotype)) +
+  stat_summary(geom = "errorbar", 
+               position = position_dodge(0.7), 
+               width = 0.3,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  stat_summary(geom = "point", 
+               position = position_dodge(0.7), 
+               size = 6,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  facet_grid(~Treatment, scales = "free_x") +
+  coord_cartesian(ylim=c(0,1)) +
+  scale_x_discrete(
+    labels = function(x) {
+      if ("LB" %in% unique(Data$Treatment)) {
+        # For LB, show only '0'
+        ifelse(x == "0", "0", x)
+      } else {
+        # For other treatments, show the specific values
+        ifelse(x %in% c("0.01", "0.1", "0.5", "1", "4", "8"), x, NA)
+      }
+    }
+  ) +
+  scale_shape_manual(values = c(4,1,2,0,5,7,8)) + 
+  theme_classic() +
+  labs(x = "OD",
+       y = "Fs on day 4",
+       pch="OD") +
+  scale_color_manual(values = c("red",
+                                "blue",
+                                "darkgreen")) +
+  theme(legend.position = "top",
+        legend.text = element_text(size = 30),
+        legend.title = element_text(size = 30),
+        axis.title = element_text(size = 30),
+        strip.background = element_blank(),
+        strip.text = element_text(size = 30, face = "italic"),
+        axis.text = element_text(size = 30)) +
+  guides(color=FALSE)
+
+Data$Treatment <- factor(Data$Treatment, levels = c("LB",
+                                                    "P. alcalifaciens",
+                                                    "P. burhodogranareia strD",
+                                                    "P. rettgeri",
+                                                    "P. sneebia"))
+# Figure 2C
+Risk <- ggplot(Data, 
+                aes(x = as.factor(OD_group), 
+                    y = Risk_Score,
+                    pch = as.factor(OD_group),
+                    col = Genotype)) +
+  stat_summary(geom = "errorbar", 
+               position = position_dodge(0.7), 
+               width = 0.3,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  stat_summary(geom = "point", 
+               position = position_dodge(0.7), 
+               size = 6,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  facet_grid(~Treatment, scales = "free_x") +
+  scale_x_discrete(
+    labels = function(x) {
+      if ("LB" %in% unique(Data$Treatment)) {
+        # For LB, show only '0'
+        ifelse(x == "0", "0", x)
+      } else {
+        # For other treatments, show the specific values
+        ifelse(x %in% c("0.01", "0.1", "0.5", "1", "4", "8"), x, NA)
+      }
+    }
+  ) +
+  scale_shape_manual(values = c(4,1,2,0,5,7,8)) + 
+  theme_classic() +
+  labs(x = "OD",
+       y = "Fs on day 4",
+       pch="OD") +
+  scale_color_manual(values = c("red",
+                                "blue",
+                                "darkgreen")) +
+  labs(x = "OD",
+       y = "Risk Score",
+       pch="OD") +
+  theme(legend.position = "top",
+        legend.text = element_text(size = 30),
+        legend.title = element_text(size = 30),
+        axis.title = element_text(size = 30),
+        strip.background = element_blank(),
+        strip.text = element_text(size = 30, face = "italic"),
+        axis.text = element_text(size = 30)) +
+  guides(color=FALSE)
+
+
+Figure2 <- ggarrange(Survival, FracSick, Risk, 
+                  nrow = 3, ncol = 1, 
+                  common.legend = TRUE, 
+                  labels = "AUTO",
+                  font.label = list(size = 40),
+                  heights = c(0.6, 0.2, 0.2))
+
+```
+
+**Figure 2** - Host-based measures of pathogenicity:
+
+* A. Survival curves, 
+
+* B. Fraction symptomatic on Day4, and 
+
+* C. Risk scores for infected flies of various host genotypes (homozygous serine dpt (wildtype, dptS69), homozygous arginine dpt (dptS69R), and dpt null (Δdpt)), and variable pathogen strains (*P. burhodograneria* Strain D, *P. rettgeri*, *P. sneebia*, *P. alcalifaciens*) with different loads of infective inoculum (OD).
+
+```{r fig.width=30, fig.height=35, message=FALSE, echo=FALSE, warning=FALSE}
+Figure2
+```
+
+### Figure 3
+
+```{r message=FALSE, warning=FALSE}
+# Figure 3A
+PP_D4 <- ggplot(Data, 
+                aes(x = as.factor(OD_group), 
+                    y = PP_Day4,
+                    pch = as.factor(OD_group),
+                    col = Genotype)) +
+  stat_summary(geom = "errorbar", 
+               position = position_dodge(0.7), 
+               width = 0.3,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  stat_summary(geom = "point", 
+               position = position_dodge(0.7), 
+               size = 6,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  facet_grid(~Treatment, scales = "free_x") +
+  scale_x_discrete(
+    labels = function(x) {
+      if ("LB" %in% unique(Data$Treatment)) {
+        # For LB, show only '0'
+        ifelse(x == "0", "0", x)
+      } else {
+        # For other treatments, show the specific values
+        ifelse(x %in% c("0.01", "0.1", "0.5", "1", "4", "8"), x, NA)
+      }
+    }
+  ) +
+  scale_shape_manual(values = c(4,1,2,0,5,7,8)) + 
+  theme_classic() +
+  labs(x = "OD",
+       y = "Fs on day 4",
+       pch="OD") +
+  scale_color_manual(values = c("red",
+                                "blue",
+                                "darkgreen")) +
+  labs(x = "OD",
+       y = "PP on day 4",
+       pch="OD") +
+  theme(legend.position = "top",
+        legend.text = element_text(size = 30),
+        legend.title = element_text(size = 30),
+        axis.title = element_text(size = 30),
+        strip.background = element_blank(),
+        strip.text = element_text(size = 30, face = "italic"),
+        axis.text = element_text(size = 30))
+
+# Figure 3B
+PP_T <- ggplot(Data, 
+                aes(x = as.factor(OD_group), 
+                    y = PP_T,
+                    pch = as.factor(OD_group),
+                    col = Genotype)) +
+  stat_summary(geom = "errorbar", 
+               position = position_dodge(0.7), 
+               width = 0.3,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  stat_summary(geom = "point", 
+               position = position_dodge(0.7), 
+               size = 6,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  facet_grid(~Treatment, scales = "free_x") +
+  scale_x_discrete(
+    labels = function(x) {
+      if ("LB" %in% unique(Data$Treatment)) {
+        # For LB, show only '0'
+        ifelse(x == "0", "0", x)
+      } else {
+        # For other treatments, show the specific values
+        ifelse(x %in% c("0.01", "0.1", "0.5", "1", "4", "8"), x, NA)
+      }
+    }
+  ) +
+  scale_shape_manual(values = c(4,1,2,0,5,7,8)) + 
+  theme_classic() +
+  labs(x = "OD",
+       y = "Fs on day 4",
+       pch="OD") +
+  scale_color_manual(values = c("red",
+                                "blue",
+                                "darkgreen")) +
+  labs(x = "OD",
+       y = "PP_T",
+       pch="OD") +
+  theme(legend.position = "top",
+        legend.text = element_text(size = 30),
+        legend.title = element_text(size = 30),
+        axis.title = element_text(size = 30),
+        strip.background = element_blank(),
+        strip.text = element_text(size = 30, face = "italic"),
+        axis.text = element_text(size = 30))
+
+# Figure 3C
+Fs_T <- ggplot(Data, 
+                aes(x = as.factor(OD_group), 
+                    y = Fs_T,
+                    pch = as.factor(OD_group),
+                    col = Genotype)) +
+  stat_summary(geom = "errorbar", 
+               position = position_dodge(0.7), 
+               width = 0.3,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  stat_summary(geom = "point", 
+               position = position_dodge(0.7), 
+               size = 6,
+               #aes(alpha = as.numeric(OD_group))
+               ) +
+  facet_grid(~Treatment, scales = "free_x") +
+  coord_cartesian(ylim=c(0,1)) +
+  scale_x_discrete(
+    labels = function(x) {
+      if ("LB" %in% unique(Data$Treatment)) {
+        # For LB, show only '0'
+        ifelse(x == "0", "0", x)
+      } else {
+        # For other treatments, show the specific values
+        ifelse(x %in% c("0.01", "0.1", "0.5", "1", "4", "8"), x, NA)
+      }
+    }
+  ) +
+  scale_shape_manual(values = c(4,1,2,0,5,7,8)) + 
+  theme_classic() +
+  labs(x = "OD",
+       y = "Fs on day 4",
+       pch="OD") +
+  scale_color_manual(values = c("red",
+                                "blue",
+                                "darkgreen")) +
+  labs(x = "OD",
+       y = "Fs_T",
+       pch="OD") +
+  theme(legend.position = "top",
+        legend.text = element_text(size = 30),
+        legend.title = element_text(size = 30),
+        axis.title = element_text(size = 30),
+        strip.background = element_blank(),
+        strip.text = element_text(size = 30, face = "italic"),
+        axis.text = element_text(size = 30))
+
+Figure3 <- ggarrange(PP_D4, PP_T, Fs_T, 
+                  nrow = 3, ncol = 1, 
+                  common.legend = TRUE, 
+                  labels = "AUTO",
+                  font.label = list(size = 40))
+```
+
+**Figure 3** 
+
+* A. Pathogen potential on Day 4 post-infection, 
+* B. Pathogen potential on median survival day (T), and 
+* C. Fraction symptomatic on median survival day (T) for infected flies of various host genotypes (homozygous serine dpt (wildtype, dptS69), homozygous arginine dpt (dptS69R), and dpt null (Δdpt)), and variable pathogen strains (*P. burhodograneria* Strain D, *P. rettgeri*, *P. sneebia*, *P. alcalifaciens*) with different loads of infective inoculum (OD).
+
+```{r fig.width=30, fig.height=22, message=FALSE, echo=FALSE, warning=FALSE}
+Figure3
+```
+
+## Figure 4
+
+Figure 4A
+
+```{r message=FALSE, warning=FALSE}
+# Variables of interest
+variables_of_interest <- c("Risk_Score", 
+                           "Prop_Day4_Alive", 
+                           "Fs_Day4", 
+                           "PP_Day4", 
+                           "Fs_T", 
+                           "PP_T")
+
+# Create an empty dataframe to store p-values matrices
+Data_stats_1 <- data.frame(
+  variable = character(),
+  OD_group = character(),
+  Genotype = character(),
+  Treatment = character(),
+  `OD_group*Genotype` = character(),
+  `OD_group*Treatment` = character(),
+  `Genotype*Treatment` = character(),
+  `OD_group*Genotype*Treatment` = character(),
+  stringsAsFactors = FALSE
+)
+TableS3 <- list()
+
+# Loop through each variable of interest
+for (variable in variables_of_interest) {
+  # Fit an ANOVA model
+  model <- aov(as.formula(paste(variable, "~ OD_group * Genotype * Treatment + Error(Vial_ID+Date)")), data = Data)
+  
+  # Extract ANOVA table
+  anova_table <- as.data.frame(summary(model$Within)[[1]])
+  
+  TableS3[[variable]] <- anova_table
+  
+  # Create a new row to append
+  new_row <- data.frame(
+    variable = variable,
+    OD_group = anova_table$`Pr(>F)`[1],
+    Genotype = anova_table$`Pr(>F)`[2],
+    Treatment = anova_table$`Pr(>F)`[3],
+    `OD_group*Genotype` = anova_table$`Pr(>F)`[4],
+    `OD_group*Treatment` = anova_table$`Pr(>F)`[5],
+    `Genotype*Treatment` = anova_table$`Pr(>F)`[6],
+    `OD_group*Genotype*Treatment` = anova_table$`Pr(>F)`[7]
+  )
+  
+  # Append the new row to Data_stats_1
+  Data_stats_1 <- rbind(Data_stats_1, new_row)
+}
+
+Risk_Score_anova <- TableS3[["Risk_Score"]]
+Prop_Day4_Alive_anova <- TableS3[["Prop_Day4_Alive"]]
+Fs_Day4_anova <- TableS3[["Fs_Day4"]]
+PP_Day4_anova <- TableS3[["PP_Day4"]]
+Fs_T_anova <- TableS3[["Fs_T"]]
+PP_T_anova <- TableS3[["PP_T"]]
+
+Data_stats <- as.data.frame(melt(Data_stats_1, id.vars = c("variable"), variable.name = "vars"))
+
+Data_stats$pval <- ifelse(Data_stats$value>0.05,"Not Significant",
+                          ifelse(Data_stats$value<0.05 &
+                                   Data_stats$value>0.01, "P<0.05",
+                                 ifelse(Data_stats$value<0.01 &
+                                          Data_stats$value>0.001, "P<0.01",
+                                        ifelse(Data_stats$value<0.001, "P<0.001","NA"))))
+
+custom_labels_vars <- c("OD_group" = "OD", 
+                   "Genotype" = "Host genotype", 
+                   "Treatment" = "Pathogen species",
+                   "OD_group.Genotype" = "OD * Host genotype",
+                   "OD_group.Treatment" = "OD * Pathogen species",
+                   "Genotype.Treatment" = "Host genotype * Pathogen species",
+                   "OD_group.Genotype.Treatment" = "OD * Host genotype * Pathogen species")
+
+custom_labels_variable <- c("Fs_Day4" = "Fs on Day4", 
+                   "Fs_T" = "Fs_T", 
+                   "PP_Day4" = "PP on Day4",
+                   "PP_T" = "PP_T",
+                   "Prop_Day4_Alive" = "Proportion alive on Day4",
+                   "Risk_Score" = "Risk score")
+
+Fig4A <- ggplot(Data_stats, aes(x=as.factor(vars),
+                         y=as.factor(variable),
+                         fill=as.factor(pval))) +
+  geom_tile() +
+  theme_bw() +
+  labs(x="Factor",
+       y="Measure of pathogenicity", 
+       fill="p-value") +
+  scale_x_discrete(labels = custom_labels_vars) +
+  scale_y_discrete(labels = custom_labels_variable) +
+  scale_fill_manual(values = c("white","maroon","red","pink")) +
+  theme(axis.text.y = element_text(size=40,
+                                   colour = c("darkorchid2","darkorchid2","orange","orange","darkorchid2","darkorchid2")),
+        axis.text.x = element_text(size=40, angle = 45, vjust = 1, hjust = 1,
+                                   colour = c("black","darkorchid2","orange","black","black","black","black")),
+        axis.title = element_text(size = 40),
+        legend.position = "top",
+        legend.text = element_text(size = 40),
+        legend.title = element_text(size = 40))
+
+```
+
+Figure 4B
+
+```{r message=FALSE, warning=FALSE}
+
+# Select the columns for analysis
+Corrdata <- Data[,c(27,34,42,46,48,49)]
+
+# Compute the correlation matrix
+M <- cor(Corrdata)
+
+TableS4 <- as.data.frame(M)
+
+# Compute the R^2 matrix
+R2 <- M^2
+
+# Melt R2 matrix into a long format
+df <- melt(R2)
+
+# Filter out the upper triangle of the matrix
+df <- df[as.numeric(df$Var1) >= as.numeric(df$Var2), ]
+
+# Correlation plot - Figure 4B
+Fig4B <- ggplot(data = df, 
+                aes(Var1, Var2, 
+                    fill = value)) +
+  geom_tile(color = "black") + 
+  scale_fill_gradient2(low = "white", 
+                       high = "lightblue", 
+                       mid = "grey90", 
+                       midpoint = 0.5) +
+  geom_text(aes(label = round(value, 2)), 
+            size = 20) +  
+  theme_classic() +  
+  theme(axis.text.x = element_text(colour = c("darkorchid2", 
+                                              "orange", 
+                                              "darkorchid2", 
+                                              "darkorchid2", 
+                                              "darkorchid2", 
+                                              "orange"),
+                                   size = 40,
+                                   angle = 45, 
+                                   vjust = 1, 
+                                   hjust = 1,),
+        axis.text.y = element_text(colour = c("darkorchid2", 
+                                              "orange", 
+                                              "darkorchid2", 
+                                              "darkorchid2", 
+                                              "darkorchid2", 
+                                              "orange"),
+                                   size = 40),
+        legend.position = "none") +
+  scale_x_discrete(labels = custom_labels_variable) +  
+  scale_y_discrete(labels = custom_labels_variable) +
+  labs(x="",
+       y="")
+
+Figure4 <- ggarrange(Fig4A, Fig4B, 
+                  nrow = 1, ncol = 2, 
+                  labels = "AUTO",
+                  font.label = list(size = 50))
+
+```
+
+
+**Figure 4A** P-values from ANOVA to indicate the significance of each factor corresponding to each measure of pathogenicity 
+
+**Figure 4B** Heatmap showing R2 (R=correlation coefficient) values to assess the differences between different measures of host susceptibility (survival, risk scores, and fraction symptomatic) and pathogen virulence (pathogen potential) 
+
+[Prop_Day4_Alive: Proportion survival on Day 4 post-infection, PP_Day4: Pathogen potential on Day 4, PP_T: Pathogen potential on median survival day, Fs_Day4: Fraction symptomatic on Day 4, Fs_T: Fraction symptomatic on median survival day]. 
+
+```{r fig.width=40, fig.height=20, message=FALSE, echo=FALSE, warning=FALSE}
+Figure4
+```
+
+## Supplementary Figures
+
+### Figure S1
+
+```{r message=FALSE, warning=FALSE}
+FigureS1 <- ggplot(LoadData, aes(x=OD,
+                 y=`Bacterial_Load_CFU/fly`,
+                 col=Treatment)) +
+  geom_point(alpha=0.5,
+             position = position_jitterdodge()) +
+  stat_smooth(method = 'lm',
+              se=FALSE) +
+  theme_bw() +
+  theme(axis.text=element_text(size = 24),
+        legend.text = element_text(size = 20, face = "italic"),
+        legend.position = "top",
+        title=element_text(size = 20)) +
+  labs(y="Bacterial load (CFU/fly)")
+```
+
+**Figure S1**- Bacterial load (CFU/fly) vs OD (A600nm) for different ODs and different pathogens. Single infected flies were homogenized in 500microL LB and plated on LB plates immediately after the infection.
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+FigureS1
+```
+
+### Figure S2
+
+```{r message=FALSE, warning=FALSE}
+
+#Subsetting Data for PCA
+Subset <- Data[,c(1:4,24:37,39:46,48:50)]
+
+row.names(Subset) = paste(Subset$Genotype,Subset$Treatment,Subset$OD_group,Subset$Vial_ID)
+
+PCA <- prcomp(t(Subset[,c(5:29)]), scale. = TRUE)
+summary(PCA)
+
+PCA_scores <- PCA$x
+
+FigureS2 <- ggplot(as.data.frame(PCA_scores),
+                   aes(x=PC1,
+                       y = PC2,
+                       col = row.names(PCA_scores))) +
+  geom_point(position = position_jitterdodge(),
+             size = 3.5, 
+             alpha = 0.6) +
+  theme_bw() +
+  geom_label_repel(aes(label = row.names(PCA_scores)), 
+                   nudge_x = ifelse(row.names(PCA_scores)%in%c("PP_Day1","PP_Day2","PP_Day3","PP_Day4","PP_Day5","PP_Day6","PP_Day7"),4,-2), 
+                   nudge_y = ifelse(row.names(PCA_scores)%in%c("Fs_Day1","Fs_Day2","Fs_Day3","Fs_Day4","Fs_Day5","Fs_Day6","Fs_Day7","PP_Day1","PP_Day2","PP_Day3","PP_Day4","PP_Day5","PP_Day6","PP_Day7"),-3,3),
+                   max.overlaps = Inf,
+                   box.padding = 0.5,
+                   point.padding = 0.3,
+                   force = 2,
+                   show.legend = FALSE,
+                   label.size = 0.5) +
+  theme(legend.position = "none",
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 30)) +
+  labs(y = "PC2: 0.016%",
+       x = "PC1: 99.98%",
+       col = "")
+```
+
+**Figure S2** Principal component analysis (PCA) over different measures of host susceptibility (survival, risk scores, and fraction symptomatic) and pathogen virulence (pathogen potential). [Prop_DayX_Alive: Proportion survival on Day X post-infection, PP_DayX: Pathogen potential on Day X post-infection, PP_T: Pathogen potential on median survival day, Fs_T/T: Fraction symptomatic on median survival day/ Median survival day, Fs_DayX: Fraction symptomatic on Day X post-infection, Fs_T: Fraction symptomatic on median survival day].
+
+```{r fig.width=9,fig.height=7, message=FALSE, echo=FALSE, warning=FALSE}
+FigureS2
+```
+
+## Statistical Analysis
+
+### Table S1
+
+**Table S1:** Statistical analysis for analyzing the effect of OD and treatment (pathogen species) on log-transformed bacterial load. Data was fitted to a linear mixed-effects model. 
+
+[Model: lm( (`Bacterial_Load_CFU/fly`+1) ~ OD + Treatment)]
+
+```{r message=FALSE, warning=FALSE}
+Model1 <- lm(`Bacterial_Load_CFU/fly`~OD+Treatment,data = LoadData)
+
+MSum1 <- summary(Model1)
+TableS1 <- as.data.frame(MSum1$coefficients)
+print(TableS1)
+```
+
+### Table S2
+
+**Table S2:** Statistical analysis for analyzing the effect of OD, treatment (pathogen species), and host genotype on survival. Data was fitted to a mixed-effects cox-proportional hazards model.
+
+[Model: coxph(Survival ~ OD * Treatment * Genotype]
+
+```{r message=FALSE, warning=FALSE}
+
+Data_cox <- subset(Data_1, Day_Dead!=0 & OD_group!=0)
+
+Data_cox$Treatment <- factor(Data_cox$Treatment, levels = c("P. sneebia","P. alcalifaciens","P. burhodogranareia strD","P. rettgeri"))
+Data_cox$Genotype <- factor(Data_cox$Genotype, levels = c("DptNull","DptR","DptS"))
+Data_cox$OD_group <- factor(Data_cox$OD_group, levels = c("0.01","0.1","0.5","1","8"))
+
+colnames(Data_cox)[colnames(Data_cox)=="OD_group"] <- "OD"
+colnames(Data_cox)[colnames(Data_cox)=="Genotype"] <- "Gn"
+colnames(Data_cox)[colnames(Data_cox)=="Treatment"] <- "Trt"
+
+cox <- coxph(Surv(Day_Dead, censor) ~ OD + Trt + Gn + frailty(Date),
+                       data = Data_cox)
+
+cox_inter <- coxph(Surv(Day_Dead, censor) ~ OD + Trt + Gn +
+                       OD*Trt + Trt*Gn + Gn*OD + frailty(Date),
+                     data = Data_cox)
+
+cox_inter2 <- coxph(Surv(Day_Dead, censor) ~ OD*Gn*Trt + frailty(Date),
+                     data = Data_cox)
+
+AIC(cox, cox_inter, cox_inter2)
+
+
+TableS2 <- as.data.frame(summary(cox_inter2)$coefficients)
+
+TableS2$`significance level` <- ifelse(TableS2$`p`<=0.001, "***",
+                                       ifelse(TableS2$`p`<=0.01, "**",
+                                              ifelse(TableS2$`p`<=0.05, "*",
+                                                     "Not significant")))
+
+
+print(TableS2)
+
+```
+
+
+### Table S3
+
+**Table S3:** ANOVA for analyzing the effect of OD, treatment (pathogen species), and host genotype on different measures of pathogenicity, corresponding to Figure 4A.
+
+[Model: aov(“Measure of pathogenicity” ~ OD * Treatment * Genotype]
+
+```{r message=FALSE, warning=FALSE}
+
+# Variables of interest
+variables_of_interest <- c("Risk_Score", 
+                           "Prop_Day4_Alive", 
+                           "Fs_Day4", 
+                           "PP_Day4", 
+                           "Fs_T", 
+                           "PP_T")
+
+# Create an empty dataframe to store p-values matrices
+Data_stats_1 <- data.frame(
+  variable = character(),
+  OD_group = character(),
+  Genotype = character(),
+  Treatment = character(),
+  `OD_group*Genotype` = character(),
+  `OD_group*Treatment` = character(),
+  `Genotype*Treatment` = character(),
+  `OD_group*Genotype*Treatment` = character(),
+  stringsAsFactors = FALSE
+)
+TableS3 <- list()
+
+# Loop through each variable of interest
+for (variable in variables_of_interest) {
+  # Fit an ANOVA model
+  model <- aov(as.formula(paste(variable, "~ OD_group * Genotype * Treatment + Error(Vial_ID+Date)")), data = Data)
+  
+  # Extract ANOVA table
+  anova_table <- as.data.frame(summary(model$Within)[[1]])
+  
+  TableS3[[variable]] <- anova_table
+  
+  # Create a new row to append
+  new_row <- data.frame(
+    variable = variable,
+    OD_group = anova_table$`Pr(>F)`[1],
+    Genotype = anova_table$`Pr(>F)`[2],
+    Treatment = anova_table$`Pr(>F)`[3],
+    `OD_group*Genotype` = anova_table$`Pr(>F)`[4],
+    `OD_group*Treatment` = anova_table$`Pr(>F)`[5],
+    `Genotype*Treatment` = anova_table$`Pr(>F)`[6],
+    `OD_group*Genotype*Treatment` = anova_table$`Pr(>F)`[7]
+  )
+  
+  # Append the new row to Data_stats_1
+  Data_stats_1 <- rbind(Data_stats_1, new_row)
+}
+
+
+Risk_Score_anova <- TableS3[["Risk_Score"]]
+Prop_Day4_Alive_anova <- TableS3[["Prop_Day4_Alive"]]
+Fs_Day4_anova <- TableS3[["Fs_Day4"]]
+PP_Day4_anova <- TableS3[["PP_Day4"]]
+Fs_T_anova <- TableS3[["Fs_T"]]
+PP_T_anova <- TableS3[["PP_T"]]
+```
+
+#### A. Risk score
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+print(Risk_Score_anova)
+```
+#### B. Proportion alive on day 4
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+print(Prop_Day4_Alive_anova)
+```
+#### C. Pathogen potential on median survival day (PP_T)
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+print(PP_T_anova)
+```
+#### D. Pathogen potential on day 4 (PP_Day4)
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+print(PP_Day4_anova)
+```
+#### E.	Fraction symptomatic on median survival day (Fs_T)
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+print(Fs_T_anova)
+```
+#### F. Fraction symptomatic on day 4 (Fs_Day4)
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+print(Fs_Day4_anova)
+```
+
+
+### Table S4
+
+**Table S4:** Correlation matrix for different measures of pathogenicity containing R values corresponding to Figure 4B.
+
+```{r message=FALSE, warning=FALSE}
+
+# Select the columns for analysis
+Corrdata <- Data[,c(27,34,42,46,48:50)]
+
+# Compute the correlation matrix
+M <- cor(Corrdata)
+
+TableS4 <- as.data.frame(M)
+
+print(TableS4)
+```
